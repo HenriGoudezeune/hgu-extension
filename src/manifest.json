@@ -1,0 +1,28 @@
+{
+  "manifest_version": 3,
+  "name": "HGU: HydrarGyrum Ufora",
+  "version": "0.1.0",
+  "description": "Een snellere, rustige weergave van Ufora (UGent). Alles gebeurt in je eigen browser met je eigen login.",
+  "icons": {
+    "16": "icons/icon-16.png",
+    "48": "icons/icon-48.png",
+    "128": "icons/icon-128.png"
+  },
+  "action": {
+    "default_title": "HGU openen",
+    "default_icon": {
+      "16": "icons/icon-16.png",
+      "48": "icons/icon-48.png"
+    }
+  },
+  "host_permissions": [
+    "https://ufora.ugent.be/*",
+    "https://hydra.ugent.be/*"
+  ],
+  "content_security_policy": {
+    "extension_pages": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https://ufora.ugent.be; media-src blob:; frame-src 'self' blob:; connect-src https://ufora.ugent.be https://hydra.ugent.be; object-src 'self'; base-uri 'none'; form-action 'none'"
+  },
+  "background": {
+    "service_worker": "background.js"
+  }
+}
