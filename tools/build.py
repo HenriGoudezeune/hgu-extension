@@ -2,6 +2,7 @@
 
     python tools/build.py
 """
+import hashlib
 import json
 import shutil
 import zipfile
@@ -32,3 +33,8 @@ for name, extra in TARGETS.items():
             if f.is_file():
                 zf.write(f, f.relative_to(out).as_posix())
     print("gebouwd:", out, "->", z.name)
+
+# SHA-256 van elke zip (formaat van sha256sum: `sha256sum -c SHA256SUMS`)
+sums = "".join(f"{hashlib.sha256(z.read_bytes()).hexdigest()}  {z.name}\n" for z in sorted(DIST.glob("*.zip")))
+(DIST / "SHA256SUMS").write_text(sums, "utf-8")
+print(sums, end="")

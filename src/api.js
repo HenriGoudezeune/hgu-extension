@@ -10,6 +10,8 @@ const MENU_TTL = 3 * 3600 * 1000;
 const ext = globalThis.browser ?? globalThis.chrome;
 
 export class NotLoggedIn extends Error {}
+/** Ufora gaf een antwoord dat niet de verwachte vorm heeft (API gewijzigd of onverwachte pagina). */
+export class FormatError extends Error {}
 export class HttpError extends Error {
   constructor(status, detail = "") { super(`HTTP ${status} ${detail}`.trim()); this.status = status; }
 }
@@ -17,11 +19,28 @@ export class HttpError extends Error {
 // Ufora-topic-URL's bevatten soms rauwe spaties; al gecodeerde %xx blijven ongemoeid
 const encodePath = p => encodeURI(p).replace(/%25([0-9A-Fa-f]{2})/g, "%$1");
 
+// Vriendelijk voor Ufora: hoogstens CONCURRENCY verzoeken tegelijk; bij 429/5xx/netwerkfout opnieuw proberen met
+// exponentiële wachttijd (500 ms, 1 s, 2 s, ...; Retry-After wordt gerespecteerd).
+const CONCURRENCY = 3;
+const MAX_TRIES = 4;
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+async function fetchRetry(url, opts) {
+  for (let n = 0; ; n++) {
+    let r = null;
+    try { r = await fetch(url, opts); } catch (e) { if (n + 1 >= MAX_TRIES) throw e; }
+    if (r && r.status !== 429 && r.status < 500) return r;
+    if (n + 1 >= MAX_TRIES) return r;  // laatste poging: geef de fout door (r is hier niet null)
+    const ra = r && Number(r.headers.get("retry-after"));
+    await sleep(ra > 0 ? Math.min(ra, 30) * 1000 : 500 * 2 ** n + Math.random() * 250);
+  }
+}
+
 /** GET op Ufora met de cookies van de browser. Een verlopen sessie eindigt in een redirect naar de loginpagina. */
 export async function raw(path) {
   let r;
   try {
-    r = await fetch(BASE + encodePath(path), { credentials: "include", redirect: "manual" });
+    r = await fetchRetry(BASE + encodePath(path), { credentials: "include", redirect: "manual" });
   } catch (e) {
     throw new Error("Geen verbinding met Ufora.");
   }
@@ -31,7 +50,8 @@ export async function raw(path) {
     if (await loggedIn()) throw new HttpError(403);
     throw new NotLoggedIn();
   }
-  if (!r.ok) throw new HttpError(r.status);
+  if (r.status === 429) throw new HttpError(429, "Ufora vraagt om even te wachten (te veel verzoeken). Probeer het later opnieuw.");
+  if (!r.ok) throw new HttpError(r.status, r.status >= 500 ? "Ufora heeft een storing. Probeer het later opnieuw." : "");
   return r;
 }
 
@@ -45,17 +65,26 @@ export async function loggedIn() {
 async function getJSON(path) {
   const r = await raw(path);
   if (!(r.headers.get("content-type") || "").includes("json")) throw new NotLoggedIn();  // loginpagina met status 200
-  return r.json();
+  try { return await r.json(); }
+  catch { throw new FormatError("Ufora gaf geen leesbaar antwoord."); }
 }
+
+/** Controleer de vorm van een antwoord; een onverwachte vorm is een duidelijke fout, nooit een stille lege lijst. */
+function expect(ok, what) {
+  if (!ok) throw new FormatError(`onverwacht antwoord van Ufora (${what})`);
+}
+const isArr = Array.isArray;
 
 // ---------- vakken, inhoud, opdrachten, aankondigingen ----------
 const shortName = name => name.replace(/^[A-Z]\d{6}[A-Z]?\s*-\s*/, "");
 
 async function getCourses() {
   let data = await getJSON("/d2l/api/lp/1.43/enrollments/myenrollments/?orgUnitTypeId=3");
+  expect(isArr(data?.Items) && data.PagingInfo, "lijst met vakken");
   const items = [...data.Items];
   while (data.PagingInfo.HasMoreItems) {
     data = await getJSON("/d2l/api/lp/1.43/enrollments/myenrollments/?orgUnitTypeId=3&bookmark=" + data.PagingInfo.Bookmark);
+    expect(isArr(data?.Items) && data.PagingInfo, "lijst met vakken");
     items.push(...data.Items);
   }
   const year = code => { const m = /_(\d{4})$/.exec(code); return m && +m[1]; };
@@ -87,7 +116,11 @@ function simplify(modules) {
 }
 
 /** De ruwe inhoudsopgave van een vak (ook voor de synchronisatie). */
-export const getToc = ou => getJSON(`/d2l/api/le/1.75/${ou}/content/toc`);
+export const getToc = async ou => {
+  const toc = await getJSON(`/d2l/api/le/1.75/${ou}/content/toc`);
+  expect(isArr(toc?.Modules), "inhoudsopgave van een vak");
+  return toc;
+};
 
 async function getCourse(ou) {
   return { id: ou, modules: simplify((await getToc(ou)).Modules) };
@@ -99,7 +132,7 @@ async function currentCourses() {
   return [courses.filter(c => c.year == null || c.year === year || c.pinned), year];
 }
 
-/** producer(vak) met hoogstens 6 tegelijk; vakken zonder toegang (403/404) vallen weg. */
+/** producer(vak) met hoogstens CONCURRENCY tegelijk; enkel vakken zonder toegang (403/404) vallen weg, elke andere fout stopt het geheel met een melding. */
 async function perCourse(courses, producer) {
   const out = new Array(courses.length);
   let next = 0;
@@ -107,10 +140,10 @@ async function perCourse(courses, producer) {
     while (next < courses.length) {
       const i = next++;
       try { out[i] = await producer(courses[i]); }
-      catch (e) { if (e instanceof HttpError) out[i] = []; else throw e; }
+      catch (e) { if (e instanceof HttpError && (e.status === 403 || e.status === 404)) out[i] = []; else throw e; }
     }
   };
-  await Promise.all(Array.from({ length: Math.min(6, courses.length) }, worker));
+  await Promise.all(Array.from({ length: Math.min(CONCURRENCY, courses.length) }, worker));
   return out.flat();
 }
 
@@ -139,16 +172,19 @@ async function getAssignments() {
   const [courses] = await currentCourses();
   const items = await perCourse(courses.filter(c => c.year), async c => {  // infosites (jaarloos) hebben geen opdrachten
     const folders = await getJSON(`/d2l/api/le/1.75/${c.id}/dropbox/folders/`);
+    expect(isArr(folders), "opdrachten");
     return Promise.all(folders.filter(f => !f.IsHidden).map(f => assignment(c.id, f)));
   });
   return items.sort((a, b) => (a.due || "9999").localeCompare(b.due || "9999"));
 }
 
+const expectNews = list => { expect(isArr(list), "aankondigingen"); return list; };
+
 async function getNews() {
   const [courses, year] = await currentCourses();
   const since = `${year}-08-01`;  // oudere berichten van de infosites zijn niet meer relevant
   const items = await perCourse(courses, async c =>
-    (await getJSON(`/d2l/api/le/1.75/${c.id}/news/`))
+    (expectNews(await getJSON(`/d2l/api/le/1.75/${c.id}/news/`)))
       .filter(n => !n.IsHidden && (n.StartDate || n.CreatedDate || "") >= since)
       .map(n => ({ ou: c.id, id: n.Id, title: n.Title, html: n.Body.Html, date: n.StartDate || n.CreatedDate,
                    pinned: n.IsPinned, attachments: files(n.Attachments) })));
@@ -274,6 +310,10 @@ export async function handleApi(url, init = {}) {
     return json(404, { error: "niet gevonden" });
   } catch (e) {
     if (e instanceof NotLoggedIn) return json(401, { error: "login" });
+    if (e instanceof FormatError || e instanceof TypeError || e instanceof SyntaxError) {  // TypeError = ontbrekend veld in een antwoord
+      console.error("HGU: onverwacht antwoord", e);
+      return json(502, { error: "Ufora gaf een antwoord dat HGU niet begrijpt (" + (e instanceof FormatError ? e.message : "ontbrekend veld") + "). De Ufora-API is mogelijk gewijzigd. Controleer je gegevens op Ufora zelf en meld dit op GitHub." });
+    }
     return json(502, { error: e.message || String(e) });
   }
 }

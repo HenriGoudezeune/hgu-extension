@@ -115,7 +115,7 @@ async function getJSON(url, onData) {
   }
 }
 
-// ---------- inloggen bij Ufora (start de login-flow op de achtergrond; Henri logt zelf in het Chrome-venster) ----------
+// ---------- inloggen bij Ufora (de gebruiker logt zelf in) ----------
 let loginState = "idle"; // idle | waiting | ok | failed
 let loginTimer = null;
 
