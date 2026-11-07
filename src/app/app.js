@@ -484,7 +484,6 @@ function renderAssignments() {
 }
 
 // bestanden die klaarstaan om in te dienen; blijven bewaard als de pagina hertekent
-const uploads = {};
 
 function renderAssignment(ou, fid) {
   const a = state.assignments?.find(a => a.ou === ou && a.id === fid);
@@ -504,7 +503,7 @@ function renderAssignment(ou, fid) {
       h("span", {}, a.due ? ["Deadline ", h("strong", {}, fmtLong(a.due))] : "Geen deadline"),
       h("span", { class: `pill ${kind}` }, text),
       a.group ? h("span", {}, "Groepsopdracht") : null,
-      h("a", { class: "more-link", href: `${UFORA}/d2l/lms/dropbox/user/folder_submit_files.d2l?db=${fid}&ou=${ou}`, target: "_blank" }, "Op Ufora ↗")),
+      h("a", { class: "more-link", href: `${UFORA}/d2l/lms/dropbox/user/folder_submit_files.d2l?db=${fid}&ou=${ou}`, target: "_blank" }, "Indienen op Ufora ↗")),
 
     fb ? h("section", { class: "card grade" },
       h("div", { class: "grade-top" },
@@ -520,7 +519,7 @@ function renderAssignment(ou, fid) {
       linkList(a.links),
       extra ? courseFileList(ou, extra) : null) : null,
 
-    submitBox(a),
+    null,  // geen indienen in de extensie: enkel de link "Indienen op Ufora" bovenaan
 
     h("section", { class: "card" },
       h("div", { class: "cardhead" }, subs.length ? `Jouw inzendingen (${subs.length})` : "Jouw inzendingen"),
@@ -580,99 +579,6 @@ function courseFileList(ou, { path, topics }) {
     })),
   ];
 }
-
-function submitBox(a) {
-  const key = `${a.ou}/${a.id}`;
-  const p = uploads[key] ||= { files: [], comment: "", confirm: false, busy: false, msg: null };
-  const box = h("section", { class: "card submit" });
-  if (closed(a)) return fill(box, h("div", { class: "cardhead" }, "Indienen"),
-    h("div", { class: "empty flush" }, "Deze opdracht is gesloten; indienen kan niet meer.")), box;
-  const paint = () => {
-    const input = h("input", { type: "file", multiple: "", hidden: "", onchange: e => add(e.target.files) });
-    const zone = h("label", { class: "drop" + (p.busy ? " busy" : "") }, input,
-      h("span", { class: "drop-icon" }, svg(ICON.upload, 22)),
-      h("strong", {}, "Sleep je bestanden hierheen"), h("span", { class: "sub" }, "of klik om te kiezen"));
-    zone.addEventListener("dragover", e => { e.preventDefault(); zone.classList.add("over"); });
-    zone.addEventListener("dragleave", () => zone.classList.remove("over"));
-    zone.addEventListener("drop", e => { e.preventDefault(); e.stopPropagation(); add(e.dataTransfer.files); });
-    const n = p.files.length;
-    const btn = h("button", { class: "primary" + (p.confirm ? " confirm" : ""), disabled: !n || p.busy ? "" : null,
-      onclick: () => {
-        if (!p.confirm) { p.confirm = true; paint(); clearTimeout(p.timer); p.timer = setTimeout(() => { p.confirm = false; paint(); }, 8000); }
-        else send(a, p);
-      } },
-      p.busy ? "Bezig met indienen…" : p.confirm ? `Ja, dien ${n === 1 ? "het bestand" : `${n} bestanden`} in`
-        : n ? `Indienen (${plural(n, "bestand", "bestanden")})` : "Indienen");
-    fill(box,
-      h("div", { class: "cardhead" }, a.submissions.length ? "Opnieuw indienen" : "Indienen"),
-      pastDue(a) ? h("div", { class: "note" }, "De deadline is voorbij: Ufora markeert een nieuwe inzending als te laat.") : null,
-      zone,
-      n ? h("div", { class: "files" }, p.files.map((f, i) => h("div", { class: "file" },
-        h("span", { class: "ext" }, ext(f.name).slice(0, 4)),
-        h("span", { class: "name" }, f.name),
-        h("span", { class: "meta" }, fmtSize(f.size)),
-        p.busy ? null : h("button", { class: "x", title: "Verwijderen", onclick: () => { p.files.splice(i, 1); p.confirm = false; paint(); } }, "×")))) : null,
-      h("textarea", { placeholder: "Opmerking voor de lesgever (optioneel)", rows: 2, disabled: p.busy ? "" : null,
-        oninput: e => { p.comment = e.target.value; } }, p.comment),
-      h("div", { class: "actions" },
-        p.confirm && !p.busy ? h("button", { class: "link", onclick: () => { p.confirm = false; paint(); } }, "Annuleren") : null,
-        btn),
-      p.msg ? h("div", { class: `result ${p.msg[0]}`, role: "status" }, p.msg[1], p.msg[2] === "login" ? loginBox() : null) : null);
-  };
-  const add = list => {
-    if (p.busy) return;
-    for (const f of list) if (!p.files.some(x => x.name === f.name && x.size === f.size)) p.files.push(f);
-    p.confirm = false; p.msg = null;
-    paint();
-  };
-  box.addFiles = add;
-  paint();
-  return box;
-}
-
-const toBase64 = file => new Promise((ok, fail) => {
-  const r = new FileReader();
-  r.onload = () => ok(r.result.split(",")[1]);
-  r.onerror = () => fail(r.error);
-  r.readAsDataURL(file);
-});
-
-async function send(a, p) {
-  clearTimeout(p.timer);
-  p.busy = true; p.confirm = false; p.msg = null;
-  route();
-  const sent = [...p.files];
-  try {
-    const files = await Promise.all(sent.map(async f => ({ name: f.name, type: f.type, data: await toBase64(f) })));
-    const r = await fetch(`/api/submit/${a.ou}/${a.id}`, {
-      method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ comment: p.comment, files }) });
-    const d = await r.json().catch(() => ({}));
-    if (!r.ok) throw Object.assign(new Error(d.error === "login" ? "Je Ufora-sessie is verlopen. Log opnieuw in en probeer nog eens." : d.error || `fout ${r.status}`), { login: d.error === "login" });
-    // controleren wat Ufora echt ontving
-    const latest = [...d.submissions].sort((x, y) => y.date.localeCompare(x.date))[0];
-    const got = latest ? latest.files.map(f => f.name) : [];
-    const missing = sent.filter(f => !got.includes(f.name));
-    p.files = missing; p.comment = "";
-    p.msg = missing.length
-      ? ["warn", `Ufora ontving ${sent.length - missing.length} van de ${sent.length} bestanden. De ontbrekende staan nog klaar: dien ze opnieuw in.`]
-      : ["ok", `Ingediend om ${new Date(latest.date).toLocaleTimeString("nl-BE", { hour: "2-digit", minute: "2-digit" })}. `
-        + `Ufora ontving ${sent.length === 1 ? "je bestand" : `alle ${sent.length} bestanden`}.`];
-    state.assignments = state.assignments.map(x => x.ou === d.ou && x.id === d.id ? d : x);
-  } catch (e) {
-    p.msg = ["err", "Niet ingediend: " + e.message, e.login ? "login" : null];
-  }
-  p.busy = false;
-  route();
-}
-
-// bestanden overal op de opdrachtpagina kunnen neerzetten
-window.addEventListener("dragover", e => { if (app.dataset.view?.startsWith("opd")) e.preventDefault(); });
-window.addEventListener("drop", e => {
-  if (!app.dataset.view?.startsWith("opd")) return;
-  e.preventDefault();
-  app.querySelector(".submit")?.addFiles?.(e.dataTransfer.files);
-});
 
 // ---------- aankondigingen ----------
 // gelezen = gezien op het scherm; alles ouder dan het eerste gebruik telt als gelezen

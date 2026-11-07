@@ -1,6 +1,9 @@
 """Kopieert de gedeelde frontend (app.js, style.css, theme.js) uit HGU (ufora-sync/web) naar src/app/.
 
     python tools/sync-shared.py [pad/naar/ufora-sync]
+
+LET OP: src/app/app.js is voor de extensie aangepast (URL-hook, geen indienen). Dit script overschrijft die
+aanpassingen met de HGU-bron en is daarom niet meer veilig: loop de diff na of gebruik het niet.
 """
 import shutil
 import sys
